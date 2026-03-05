@@ -12,6 +12,7 @@ Results saved to logs/benchmark_results.json.
 import json
 import os
 import time
+import urllib.request
 
 import torch
 from PIL import Image, ImageDraw
@@ -113,16 +114,20 @@ def compute_visual_scores(captured: dict,
 def prune_cache(cache, keep_mask: torch.Tensor):
     """
     Remove sequence positions where keep_mask is False from every layer.
-    Handles DynamicCache (key_cache/value_cache lists) and legacy tuple-of-tuples
-    (past_key_values returned when output_attentions=True in transformers 4.44+).
+    Supports DynamicCache with .layers[i].keys/.values (transformers >=4.48)
+    and legacy DynamicCache with .key_cache/.value_cache lists.
     """
     if isinstance(cache, DynamicCache):
-        for i in range(len(cache.key_cache)):
-            cache.key_cache[i]   = cache.key_cache[i]  [:, :, keep_mask, :]
-            cache.value_cache[i] = cache.value_cache[i][:, :, keep_mask, :]
+        if hasattr(cache, 'layers'):
+            for layer in cache.layers:
+                layer.keys   = layer.keys  [:, :, keep_mask, :]
+                layer.values = layer.values[:, :, keep_mask, :]
+        else:
+            for i in range(len(cache.key_cache)):
+                cache.key_cache[i]   = cache.key_cache[i]  [:, :, keep_mask, :]
+                cache.value_cache[i] = cache.value_cache[i][:, :, keep_mask, :]
         return cache
     else:
-        # Legacy format: tuple of (key_tensor, value_tensor) per layer
         return tuple(
             (k[:, :, keep_mask, :], v[:, :, keep_mask, :])
             for k, v in cache
@@ -132,6 +137,8 @@ def prune_cache(cache, keep_mask: torch.Tensor):
 def _cache_device(cache):
     """Return the device of the first key tensor regardless of cache format."""
     if isinstance(cache, DynamicCache):
+        if hasattr(cache, 'layers'):
+            return cache.layers[0].keys.device
         return cache.key_cache[0].device
     return cache[0][0].device
 
@@ -184,11 +191,6 @@ def run_fastv(model, processor, inputs: dict, max_new_tokens: int,
     n_visual   = img_end - img_start
     keep_count = int(n_visual * (1 - R))
 
-    # ── Register attention hook on decoder layer K ────────────────────────────
-    captured: dict = {}
-    hook_fn = _make_attn_hook(captured, min_seq=n_visual)
-    handle  = model.language_model.model.layers[K].register_forward_hook(hook_fn)
-
     torch.cuda.synchronize()
     t0 = time.time()
 
@@ -196,15 +198,9 @@ def run_fastv(model, processor, inputs: dict, max_new_tokens: int,
     with torch.no_grad():
         prefill_out = model(**inputs, use_cache=True, output_attentions=True)
 
-    handle.remove()
-
-    if "attn" not in captured:
-        raise RuntimeError(
-            f"Attention hook did not fire for layer {K}. "
-            "Ensure attn_implementation='eager' is used."
-        )
-
     cache = prefill_out.past_key_values   # all seq_len positions
+    # Extract attention from layer K directly from the output
+    attn_layer_k = prefill_out.attentions[K].detach().float().cpu()  # (1, heads, seq, seq)
     # Seed the first decode token from the prefill's last-position logits before
     # freeing prefill_out (which holds all 32 attention matrices from
     # output_attentions=True — freeing now keeps VRAM representative of decode).
@@ -213,7 +209,8 @@ def run_fastv(model, processor, inputs: dict, max_new_tokens: int,
     torch.cuda.empty_cache()
 
     # ── Compute scores and build keep mask ────────────────────────────────────
-    attn_scores  = compute_visual_scores(captured, img_start, img_end)
+    # FastV Eq.(3): score by attention from last query position, averaged over heads
+    attn_scores = attn_layer_k[0, :, -1, img_start:img_end].mean(0)
     top_indices  = torch.topk(attn_scores, keep_count).indices.sort().values
 
     keep_mask                           = torch.zeros(seq_len, dtype=torch.bool)
@@ -233,10 +230,10 @@ def run_fastv(model, processor, inputs: dict, max_new_tokens: int,
     eos_id = processor.tokenizer.eos_token_id
     gen_ids    = [next_token.item()]
 
-    # model.language_model = LlamaForCausalLM
-    # model.language_model.model = LlamaModel (bare backbone without lm_head)
-    llm          = model.language_model.model
-    lm_head      = model.language_model.lm_head
+    # model.model.language_model = LlamaModel (bare backbone)
+    # model.lm_head = Linear
+    llm          = model.model.language_model
+    lm_head      = model.lm_head
     embed_tokens = llm.embed_tokens
 
     with torch.no_grad():
@@ -406,5 +403,115 @@ def main():
     print("\n✓ Phase 4 complete.")
 
 
+REAL_IMAGE_PATH = "data/real_test_image.jpg"
+REAL_IMAGE_URLS = [
+    "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/transformers/tasks/car.jpg",
+    "https://upload.wikimedia.org/wikipedia/commons/4/43/Cute_dog.jpg",
+]
+REAL_TEST_PROMPT = ("USER: <image>\n"
+                    "What do you see in this image?\n"
+                    "ASSISTANT:")
+
+
+def download_test_image() -> Image.Image:
+    """Download a real test image. Falls back to synthetic if all URLs fail."""
+    os.makedirs(os.path.dirname(REAL_IMAGE_PATH), exist_ok=True)
+    for url in REAL_IMAGE_URLS:
+        try:
+            print(f"      Trying: {url}")
+            urllib.request.urlretrieve(url, REAL_IMAGE_PATH)
+            img = Image.open(REAL_IMAGE_PATH).convert("RGB")
+            print(f"      Success! Size: {img.size}")
+            return img
+        except Exception as e:
+            print(f"      Failed: {e}")
+    print("      WARNING: All URLs failed. Using synthetic image as fallback.")
+    return make_test_image(REAL_IMAGE_PATH)
+
+
+def real_image_test():
+    print("=" * 70)
+    print("FastV Reproduction — Real Image Test")
+    print("=" * 70)
+
+    os.makedirs("logs", exist_ok=True)
+
+    # ── Download image ───────────────────────────────────────────────────
+    print("\n[1/4] Downloading real test image...")
+    image = download_test_image()
+
+    # ── Load model ───────────────────────────────────────────────────────
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_compute_dtype=torch.float16,
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_quant_type="nf4",
+    )
+    print(f"\n[2/4] Loading model: {MODEL_ID}")
+    t0 = time.time()
+    model = LlavaForConditionalGeneration.from_pretrained(
+        MODEL_ID,
+        quantization_config=bnb_config,
+        device_map="auto",
+        low_cpu_mem_usage=True,
+        attn_implementation="eager",
+    )
+    model.eval()
+    processor = AutoProcessor.from_pretrained(MODEL_ID)
+    print(f"      Load time: {time.time() - t0:.1f}s")
+
+    # ── Preprocess ───────────────────────────────────────────────────────
+    print("\n[3/4] Preprocessing...")
+    inputs = processor(
+        text=REAL_TEST_PROMPT, images=image, return_tensors="pt"
+    ).to(model.device)
+    input_ids = inputs["input_ids"]
+    seq_len = input_ids.shape[1]
+    img_start, img_end, n_visual = find_visual_range(
+        input_ids, model.config.image_token_index
+    )
+    print(f"      Sequence length: {seq_len}, visual tokens: {n_visual}")
+
+    # ── Pass A: Baseline ─────────────────────────────────────────────────
+    print(f"\n[4/4] Running inference passes...")
+    print(f"  Pass A — Baseline (full {n_visual} visual tokens)")
+    baseline = run_baseline(model, processor, inputs, MAX_NEW_TOKENS)
+    print(f"      {baseline['tokens_per_sec']:.1f} tok/s")
+
+    # ── Pass B: FastV K=2 R=50% ──────────────────────────────────────────
+    print(f"  Pass B — FastV K={K} R=50% ({int(n_visual * 0.50)} visual tokens)")
+    fastv_50 = run_fastv(model, processor, inputs, MAX_NEW_TOKENS,
+                         img_start, img_end, R=0.50)
+    print(f"      {fastv_50['tokens_per_sec']:.1f} tok/s")
+
+    # ── Side-by-side output ──────────────────────────────────────────────
+    print("\n" + "=" * 70)
+    print("GENERATED TEXT COMPARISON")
+    print("=" * 70)
+    print(f"\n  [Baseline]")
+    print(f"    {baseline['generated_text']}")
+    print(f"\n  [FastV K=2 R=50%]")
+    print(f"    {fastv_50['generated_text']}")
+    print()
+
+    # ── Append to benchmark_results.json ─────────────────────────────────
+    results_data = {}
+    if os.path.exists(RESULTS_PATH):
+        with open(RESULTS_PATH) as fh:
+            results_data = json.load(fh)
+    results_data["real_image_test"] = {
+        "Baseline": baseline,
+        "FastV K=2 R=50%": fastv_50,
+    }
+    with open(RESULTS_PATH, "w") as fh:
+        json.dump(results_data, fh, indent=2)
+    print(f"  Results appended → {RESULTS_PATH}")
+    print("\nDone.")
+
+
 if __name__ == "__main__":
-    main()
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "--real":
+        real_image_test()
+    else:
+        main()
