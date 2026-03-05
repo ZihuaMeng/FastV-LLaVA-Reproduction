@@ -1,0 +1,92 @@
+# ============================================================
+# Deep Learning Project .gitignore
+# FastV-LLaVA Reproduction
+# ============================================================
+
+# --- Hugging Face Model Cache & Weights ---
+*.bin
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+*.h5
+*.onnx
+models/
+weights/
+checkpoints/
+hf_cache/
+.cache/
+
+# --- Datasets & Large Data Files ---
+data/
+*.csv
+*.json
+*.jsonl
+*.parquet
+*.arrow
+*.tfrecord
+*.tar
+*.tar.gz
+*.zip
+*.hdf5
+
+# --- Logs & Outputs ---
+logs/
+outputs/
+results/
+wandb/
+runs/
+*.log
+*.out
+*.err
+tensorboard/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+*.ipynb
+
+# --- Virtual Environments & Conda ---
+.env
+.venv
+env/
+venv/
+ENV/
+*.conda
+
+# --- OS & IDE ---
+.DS_Store
+Thumbs.db
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+*~
+
+# --- Experiment Artifacts ---
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.mp4
+*.npy
+*.npz
+
+# --- Secrets ---
+.env.local
+secrets.yaml
+api_keys.txt
