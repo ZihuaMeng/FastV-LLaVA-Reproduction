@@ -1,0 +1,18 @@
+model:
+  model_id: "llava-hf/llava-1.5-7b-hf"
+  load_in_4bit: true
+  bnb_4bit_compute_dtype: "float16"
+  bnb_4bit_quant_type: "nf4"
+  bnb_4bit_use_double_quant: true
+
+fastv:
+  filtering_layer_K: 2
+  filtering_ratio_R: 0.50
+  image_token_start: 5
+  image_token_end: 581
+  n_visual_tokens: 576
+
+inference:
+  max_new_tokens: 128
+  do_sample: false
+  device_map: "auto"

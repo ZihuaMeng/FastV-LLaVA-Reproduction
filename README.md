@@ -4,9 +4,11 @@
 ![PyTorch](https://img.shields.io/badge/PyTorch-nightly%20cu128-ee4c2c?logo=pytorch&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/License-MIT-green)
 
+![Attention Collapse](assets/fig1_attention_collapse.png)
+
 A pure inference-time reproduction of the **FastV** paper:
 
-> **"An Image is Worth 1/2 Tokens After Layer 2: Plug-and-Play Acceleration for VLLM Inference"**  
+> **"An Image is Worth 1/2 Tokens After Layer 2: Plug-and-Play Acceleration for VLLM Inference"**
 > Chen et al., arXiv:2403.06764, 2024
 
 ---
@@ -27,6 +29,33 @@ FLOPs and memory bandwidth without re-training the model.
 8 GB VRAM.
 No fine-tuning, dataset preparation, or training infrastructure is involved —
 every script is a self-contained inference pass.
+
+---
+
+## Results at a Glance
+
+![Benchmark](assets/fig3_benchmark_comparison.png)
+
+![KV Compression](assets/fig4_kv_compression_ratio.png)
+
+| Method          | Throughput (tok/s) | VRAM    | KV Tokens | Speedup |
+|-----------------|--------------------|---------|-----------|---------|
+| Baseline        | 16.8               | 3.84 GB | 600       | 1.00×   |
+| FastV K=2 R=50% | 20.5               | 4.06 GB | 312       | +22%    |
+| FastV K=2 R=75% | 19.4               | 3.97 GB | 168       | +16%    |
+
+---
+
+## Visual Analysis
+
+![Token Distribution](assets/fig2_token_score_distribution.png)
+
+![Heatmap](assets/fig5_attention_heatmap.png)
+
+The attention score distribution at layer K=2 is heavily skewed — most visual tokens
+cluster near zero while a small number of spatially coherent patches receive high
+attention. FastV keeps only the high-scoring tokens, preserving semantic content
+while discarding redundant background patches.
 
 ---
 
@@ -92,22 +121,20 @@ pip install transformers==4.46.3 accelerate pillow
 
 ---
 
-## Project Structure
+## Repo Structure
 
 ```
 fastv_reproduce/
-├── src/
-│   ├── baseline_inference.py   # Phase 1 — baseline LLaVA generation, VRAM/speed metrics
-│   ├── fastv_profiler.py       # Phase 2 — per-layer attention profiling (FastV Figure 3)
-│   ├── fastv_inference.py      # Phase 3 — FastV pruning + KV cache realignment
-│   └── benchmark.py            # Phase 4 — three-way comparison on a real test image
-├── logs/
-│   ├── attn_scores_layer2.pt   # saved pruning signal (576-dim attention scores, layer 2)
-│   └── benchmark_results.json  # JSON output from benchmark.py
-├── data/
-│   └── test_image.png          # locally generated 336×336 four-quadrant test image
-├── configs/
-└── notebooks/
+├── assets/          # Result figures (5 publication-quality plots)
+├── configs/         # Experiment configuration (fastv_config.yaml)
+├── data/            # Test images
+├── logs/            # Saved tensors and benchmark JSON
+├── notebooks/       # Analysis walkthrough
+└── src/
+    ├── baseline_inference.py   # Phase 1: 4-bit baseline
+    ├── fastv_profiler.py       # Phase 2: attention analysis
+    ├── fastv_inference.py      # Phase 3: pruning + KV realignment
+    └── benchmark.py            # Phase 4: comparative evaluation
 ```
 
 Each script is runnable standalone:
