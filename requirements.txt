@@ -1,0 +1,11 @@
+# torch (nightly) — install separately using the PyTorch nightly index:
+#   pip install --pre torch torchvision torchaudio \
+#       --index-url https://download.pytorch.org/whl/nightly/cu128
+transformers==4.46.3
+accelerate==1.1.1
+bitsandbytes==0.50.0.dev0
+pillow
+matplotlib
+requests
+sentencepiece
+protobuf

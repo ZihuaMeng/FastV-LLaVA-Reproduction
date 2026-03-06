@@ -1,0 +1,37 @@
+# conda environment for fastv_reproduce
+#
+# NOTE — bitsandbytes on Blackwell (sm_120) GPUs:
+#   The pre-built bitsandbytes wheel does NOT yet include sm_120 kernels.
+#   You must compile it from source:
+#
+#     git clone https://github.com/TimDettmers/bitsandbytes.git
+#     cd bitsandbytes
+#     CUDA_VERSION=128 make cuda12x_nomatmul   # adjust as needed
+#     pip install -e .
+#
+#   See the Installation section of README.md for full step-by-step
+#   instructions: README.md#installation
+#
+name: fastv
+channels:
+  - pytorch-nightly
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  # PyTorch nightly — installed via the pytorch-nightly channel
+  - pytorch
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=12.8
+  - pip:
+    - transformers==4.46.3
+    - accelerate==1.1.1
+    - bitsandbytes==0.50.0.dev0
+    - pillow
+    - matplotlib
+    - requests
+    - sentencepiece
+    - protobuf
