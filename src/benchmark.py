@@ -204,7 +204,16 @@ def run_fastv(model, processor, inputs: dict, max_new_tokens: int,
     # Seed the first decode token from the prefill's last-position logits before
     # freeing prefill_out (which holds all 32 attention matrices from
     # output_attentions=True — freeing now keeps VRAM representative of decode).
-    next_token = prefill_out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+    repetition_penalty = 1.3
+    prefill_logits = prefill_out.logits[:, -1, :].clone()
+    seen_token_ids = set(input_ids[0].tolist())
+    if seen_token_ids:
+        seen_token_tensor = torch.tensor(
+            sorted(seen_token_ids),
+            device=prefill_logits.device,
+        )
+        prefill_logits[:, seen_token_tensor] /= repetition_penalty
+    next_token = prefill_logits.argmax(dim=-1, keepdim=True)
     del prefill_out
     torch.cuda.empty_cache()
 
@@ -229,6 +238,7 @@ def run_fastv(model, processor, inputs: dict, max_new_tokens: int,
     # ── Manual autoregressive decode via LLM backbone ─────────────────────────
     eos_id = processor.tokenizer.eos_token_id
     gen_ids    = [next_token.item()]
+    seen_token_ids.add(next_token.item())
 
     # model.model.language_model = LlamaModel (bare backbone)
     # model.lm_head = Linear
@@ -238,15 +248,25 @@ def run_fastv(model, processor, inputs: dict, max_new_tokens: int,
 
     with torch.no_grad():
         for _ in range(max_new_tokens - 1):
+            if next_token.item() == eos_id:
+                break
+
             embeds  = embed_tokens(next_token)
             llm_out = llm(inputs_embeds=embeds,
                           past_key_values=cache,
                           use_cache=True)
             cache       = llm_out.past_key_values
-            logits      = lm_head(llm_out.last_hidden_state[:, -1, :])
+            logits      = lm_head(llm_out.last_hidden_state[:, -1, :]).clone()
+            if seen_token_ids:
+                seen_token_tensor = torch.tensor(
+                    sorted(seen_token_ids),
+                    device=logits.device,
+                )
+                logits[:, seen_token_tensor] /= repetition_penalty
             next_token  = logits.argmax(dim=-1, keepdim=True)
             tok_val     = next_token.item()
             gen_ids.append(tok_val)
+            seen_token_ids.add(tok_val)
             if tok_val == eos_id:
                 break
 

@@ -125,10 +125,19 @@ def run_fastv(model, processor, inputs, max_new_tokens, attn_scores, img_start, 
     prune_dynamic_cache(cache, keep_mask_dev)
 
     # ── Manual autoregressive decode via the LLM backbone ─────────────────────
-    # Get first generated token from prefill logits (greedy)
-    next_token_id = prefill_out.logits[:, -1, :].argmax(dim=-1, keepdim=True)  # (1,1)
+    repetition_penalty = 1.3
+    prefill_logits = prefill_out.logits[:, -1, :].clone()
+    seen_token_ids = set(input_ids[0].tolist())
+    if seen_token_ids:
+        seen_token_tensor = torch.tensor(
+            sorted(seen_token_ids),
+            device=prefill_logits.device,
+        )
+        prefill_logits[:, seen_token_tensor] /= repetition_penalty
+    next_token_id = prefill_logits.argmax(dim=-1, keepdim=True)  # (1,1)
     eos_token_id = processor.tokenizer.eos_token_id
     generated_ids = [next_token_id.item()]
+    seen_token_ids.add(next_token_id.item())
 
     llm = model.model.language_model   # LlamaModel
     lm_head = model.lm_head            # Linear(4096, vocab_size)
@@ -136,6 +145,9 @@ def run_fastv(model, processor, inputs, max_new_tokens, attn_scores, img_start, 
 
     with torch.no_grad():
         for step in range(max_new_tokens - 1):
+            if next_token_id.item() == eos_token_id:
+                break
+
             # Embed the new token
             tok_embeds = embed_tokens(next_token_id)  # (1, 1, hidden_dim)
 
@@ -149,11 +161,18 @@ def run_fastv(model, processor, inputs, max_new_tokens, attn_scores, img_start, 
             hidden = llm_out.last_hidden_state  # (1, 1, hidden_dim)
 
             # Project to vocabulary
-            logits = lm_head(hidden[:, -1, :])  # (1, vocab_size)
+            logits = lm_head(hidden[:, -1, :]).clone()  # (1, vocab_size)
+            if seen_token_ids:
+                seen_token_tensor = torch.tensor(
+                    sorted(seen_token_ids),
+                    device=logits.device,
+                )
+                logits[:, seen_token_tensor] /= repetition_penalty
             next_token_id = logits.argmax(dim=-1, keepdim=True)  # (1, 1)
 
             token_val = next_token_id.item()
             generated_ids.append(token_val)
+            seen_token_ids.add(token_val)
 
             if token_val == eos_token_id:
                 break
